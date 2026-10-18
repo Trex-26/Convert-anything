@@ -1,5 +1,14 @@
 import { useCallback, useEffect, useRef } from 'react'
-import { isHeicFile } from '../lib/fileValidation'
+import { isHeicFile, guessFamily } from '../lib/fileValidation'
+
+// Normalize ingestion input: Dropzone passes { file, content } records after
+// signature validation; other callers may pass raw File objects.
+function asEntry(entry) {
+  if (entry instanceof File) {
+    return { file: entry, content: { family: guessFamily(entry), signature: null, isAnimated: false } }
+  }
+  return entry
+}
 
 // Decodes a single file into something the browser can render
 // (HTMLImageElement) and returns its intrinsic width/height plus a
@@ -63,29 +72,46 @@ export function useImageIngestion() {
   }, [])
 
   const ingest = useCallback(
-    async (files) => {
+    async (incoming) => {
       const records = await Promise.all(
-        files.map(async (file) => {
+        incoming.map(async (rawEntry) => {
+          const entry = asEntry(rawEntry)
+          const file = entry.file
+          const family = entry.content?.family ?? guessFamily(file)
           const id = `${file.name}-${file.size}-${file.lastModified}-${Math.random()
             .toString(36)
             .slice(2, 8)}`
           processing.current.add(id)
           notify()
           try {
-            const { width, height, decodedBlob, wasHeic } = await decodeForThumbnail(file)
+            // Only images get decoded/previews; documents keep their original
+            // bytes and render with an icon instead of a thumbnail.
+            const isImage = family === 'image'
+            let width = null
+            let height = null
+            let decodedBlob = null
+            let wasHeic = false
+            if (isImage) {
+              const decoded = await decodeForThumbnail(file)
+              width = decoded.width
+              height = decoded.height
+              decodedBlob = decoded.decodedBlob
+              wasHeic = decoded.wasHeic
+            }
             // If we decoded a HEIC, swap the File so downstream code embeds JPEG.
             const effectiveFile = decodedBlob
               ? new File([decodedBlob], file.name.replace(/\.(heic|heif)$/i, '.jpg'), {
                   type: 'image/jpeg',
                 })
               : file
-            const thumbnailUrl = URL.createObjectURL(effectiveFile)
             return {
               id,
               file: effectiveFile,
               name: file.name,
-              thumbnailUrl,
+              thumbnailUrl: isImage ? URL.createObjectURL(effectiveFile) : null,
               isHeic: wasHeic,
+              isAnimated: Boolean(entry.content?.isAnimated),
+              family,
               width,
               height,
             }

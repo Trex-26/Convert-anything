@@ -98,17 +98,16 @@ export function useImageIngestion() {
               decodedBlob = decoded.decodedBlob
               wasHeic = decoded.wasHeic
             }
-            // If we decoded a HEIC, swap the File so downstream code embeds JPEG.
-            const effectiveFile = decodedBlob
-              ? new File([decodedBlob], file.name.replace(/\.(heic|heif)$/i, '.jpg'), {
-                  type: 'image/jpeg',
-                })
-              : file
+            // HEIC previews use the decoded JPEG, but the original bytes are
+            // kept so the conversion engine can decode at full quality.
+            const thumbnailSource = decodedBlob ?? file
             return {
               id,
-              file: effectiveFile,
+              file,
               name: file.name,
-              thumbnailUrl: isImage ? URL.createObjectURL(effectiveFile) : null,
+              signature: entry.content?.signature ?? null,
+              mimeType: entry.content?.mimeType ?? file.type,
+              thumbnailUrl: isImage ? URL.createObjectURL(thumbnailSource) : null,
               isHeic: wasHeic,
               isAnimated: Boolean(entry.content?.isAnimated),
               family,

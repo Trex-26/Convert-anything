@@ -61,6 +61,14 @@ test('Validation - OOXML zip sniffing finds docx and xlsx', () => {
   assert.equal(detectSignature(ods), 'ods')
 })
 
+test('Validation - PPTX is not mistaken for a workbook with embedded charts', () => {
+  const pptx = new Uint8Array(4096)
+  pptx.set(ascii('PK\x03\x04'), 0)
+  pptx.set(ascii('ppt/presentation.xml'), 200)
+  pptx.set(ascii('spreadsheetml'), 900) // embedded chart parts also say this
+  assert.equal(detectSignature(pptx), 'pptx')
+})
+
 test('Validation - SVG detected from declared XML root', () => {
   const svg = ascii('<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"></svg>')
   assert.equal(detectSignature(svg), 'svg')

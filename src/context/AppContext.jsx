@@ -43,7 +43,7 @@ function reducer(state, action) {
     case 'ADD_FILES': {
       const incoming = action.files.map((f) => ({
         ...f,
-        outputFormat: defaultOutputFormat(f.file, state.targetFormat),
+        outputFormat: defaultOutputFormat(f, state.targetFormat),
         convStatus: 'idle',
         convProgress: 0,
         resultBlob: null,
@@ -89,7 +89,7 @@ function reducer(state, action) {
       const fmt = action.format
       const files = state.files.map((f) => {
         if (f.convStatus === 'done' || f.convStatus === 'converting') return f
-        const available = availableFormatsFor(f.file)
+        const available = availableFormatsFor(f)
         if (available.some((x) => x.id === fmt)) {
           return { ...f, outputFormat: fmt, convStatus: 'idle', resultBlob: null, convError: null }
         }

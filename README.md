@@ -51,7 +51,11 @@ All files are read and processed locally in your browser memory. No files are ev
 - **Styling**: Tailwind CSS v4 with modern theme tokens and responsive flex/grid layouts; system font stack (no external font requests).
 - **Images → PDF**: `pdf-lib` (pure JavaScript client-side PDF builder; embeds raster images without server overhead).
 - **PDF Page Operations**: `pdf-lib` (`src/lib/pdfOps.js`) — merge, split, rotate, extract/reorder, repackage.
-- **DOCX Parsing**: `mammoth` (`src/lib/docs.js`, lazy-loaded) — semantic HTML / raw text extraction from OOXML.
+- **PDF Reading & Rasterising**: `pdfjs-dist` (`src/lib/pdfEngine.js`) — text-layer extraction plus real page rendering to canvas.
+- **DOCX Parsing**: `mammoth` (`src/lib/docEngine.js`, lazy-loaded) — semantic HTML / raw text extraction from OOXML.
+- **DOCX Writing**: `docx` (`src/lib/docEngine.js`) — builds valid Word packages for TXT/MD/HTML/PDF sources.
+- **Presentations**: `pptx-browser` (`src/lib/slidesEngine.js`) — renders real slide canvases for PDF/JPG/PNG output.
+- **Raster Encoders**: Canvas (JPG/PNG/WebP), `gifenc` (GIF), `utif` (TIFF), hand-written BMP and ICO writers (`src/lib/imageEngine.js`).
 - **Spreadsheet Engine**: `xlsx` (SheetJS) v0.20.3 installed from the official `cdn.sheetjs.com` channel because the npm registry copy (0.18.5) carries unpatched advisories.
 - **Text → PDF**: `pdf-lib` with StandardFonts; CJK/emoji glyphs transliterated to `?` (surfaced in the UI/README).
 - **HEIC Transcoding**: `heic2any` (decodes Apple HEIC/HEIF images locally; lazy-loaded).
@@ -61,7 +65,7 @@ All files are read and processed locally in your browser memory. No files are ev
 ### Architectural Principles
 1. **Zero Server Footprint**: No conversion backend, no upload endpoints, no telemetry or tracking scripts, no external fonts or CDNs. The CSP allowlists no third-party origin at all.
 2. **Content-Sniffing Validation First**: `src/lib/fileValidation.js` classifies files by actual byte signatures and refuses family mismatches (e.g. a `.png` whose bytes are JPEG), with per-family size caps (images 25 MB, PDFs 50 MB, Office files 20 MB, text 5 MB).
-3. **Dynamic Format Registry**: Conversion capabilities are declared in a centralized registry (`src/lib/converters.js`). Only implemented, tested handlers are ever displayed in the UI.
+3. **Signature-Driven Registry**: `src/lib/registry.js` maps a *detected file signature* to the outputs an engine can actually produce. `src/lib/converters.js` only dispatches routes listed there, and the UI renders whatever the registry returns — so an unimplemented conversion can never appear as an option. The homepage support chart is generated from the same table.
 4. **Memory Safety**: Files are tracked as in-memory `File` and `Blob` references. When jobs finish or when the user triggers "Clear all", object URLs are explicitly revoked via `URL.revokeObjectURL()`.
 
 ---
@@ -79,27 +83,33 @@ convert-anything/
 │   └── sitemap.xml            # XML sitemap for SEO discoverability
 ├── src/
 │   ├── components/
-│   │   ├── ConversionControls.jsx   # Top-level format, quality, and options selector
-│   │   ├── Dropzone.jsx             # Drag-and-drop dropzone with full/compact modes
-│   │   ├── FileQueue.jsx            # Detailed batch queue, PDF-op controls, per-item downloads & ZIP export
-│   │   ├── Header.jsx               # Compact branding header with privacy indicator
-│   │   ├── MoreOptionsModal.jsx     # Settings modal (page size, orientation, margins)
+│   │   ├── ConversionPanel.jsx      # Single conversion panel: file info, output selector, convert/download
+│   │   ├── Dropzone.jsx             # Homepage drag-and-drop upload area + Select Files button
+│   │   ├── Header.jsx               # Brand + "100% Private" badge (no navigation bar)
+│   │   ├── SupportedFormats.jsx     # Homepage input → output chart (generated from registry)
 │   │   └── Spinner.jsx              # Accessible loading indicator
 │   ├── context/
 │   │   └── AppContext.jsx           # Global state manager (file queue, formats, pdfOptions, batch status)
 │   ├── hooks/
+│   │   ├── useFileIntake.js         # Shared intake: validation → queue (dropzone and Replace File)
 │   │   └── useImageProcessing.js    # Ingestion pipeline: content validation, previews, HEIC preprocessing
 │   ├── lib/
-│   │   ├── converters.js            # Central registry + dispatch engine (all families)
-│   │   ├── docs.js                  # DOCX/SheetJS/text→PDF document engine
+│   │   ├── acceptTypes.js           # Accepted MIME/extensions for the picker
+│   │   ├── converters.js            # Dispatcher: signature → engine, output validation
+│   │   ├── docEngine.js             # DOCX/TXT/MD/HTML → PDF/HTML/TXT/MD/DOCX
 │   │   ├── fileValidation.js        # Magic-byte signature sniffing, families, size caps
-│   │   └── pdfOps.js                # PDF page operations: merge, split, rotate, extract, compress
+│   │   ├── imageEngine.js           # Canvas + gifenc/UTIF/BMP/ICO raster conversion
+│   │   ├── pdfEngine.js             # pdf.js rasterising + text/DOCX/XLSX/PPTX rebuild
+│   │   ├── pdfLayout.js             # Paginated PDF layout engine (headings, runs, tables)
+│   │   ├── pdfOps.js                # PDF page operations: merge, split, rotate, extract, compress
+│   │   ├── registry.js              # Single source of truth for every supported route
+│   │   ├── sheetEngine.js           # SheetJS workbook conversions
+│   │   └── slidesEngine.js          # pptx-browser slide rendering
 │   ├── App.jsx                      # Primary layout assembler
 │   ├── index.css                    # Tailwind CSS imports and design tokens
 │   └── main.jsx                     # Application entry point
 ├── tests/
-│   ├── converters.test.js           # Registry integrity, per-family availability, privacy invariants
-│   ├── docs.test.js                 # Real DOCX/XLSX packages → mammoth/SheetJS parsing, text→PDF pagination
+│   ├── converters.test.js           # Registry integrity + real conversions for every engine
 │   ├── pdfOps.test.js               # Merge/split/rotate/extract/reorder/compress against real PDFs
 │   └── validation.test.js           # Signature detection, family routing, animated-GIF detection, caps
 ├── eslint.config.js                 # ESLint flat configuration
@@ -112,29 +122,30 @@ convert-anything/
 
 ## 4. Conversion Compatibility Matrix
 
-Everything in the **Supported** column has an implemented, unit-tested local handler. Families this app cannot serve do not appear in any output selector.
+This table is generated from `src/lib/registry.js` — the same data the homepage chart and the
+output selector use. Anything not listed here is rejected with a message instead of being faked.
 
-| Input Format | Output Format | Engine / Method | Status | Notes |
+| Input | Outputs | Engine | Status | Notes |
 | :--- | :--- | :--- | :--- | :--- |
-| **JPG / JPEG** | PDF | `pdf-lib` direct embed | **Supported** | Fast; lossless embed or quality-adjusted JPEG |
-| **PNG** | PDF | `pdf-lib` direct embed | **Supported** | Full alpha transparency preserved |
-| **WebP / GIF / BMP / SVG / AVIF / ICO** | PDF | Canvas round-trip → `pdf-lib` | **Supported** | WebP/GIF/BMP/SVG rasterize via canvas |
-| **HEIC / HEIF** | PDF / JPG / PNG / WebP | `heic2any` → pipeline | **Supported** | Transcoded locally before packaging |
-| **Any decodable image** | JPG / PNG / WebP | OffscreenCanvas / Canvas | **Supported** | Configurable JPEG/WebP quality (0.55–0.92) |
-| **GIF (animated)** | any raster | Canvas first frame | **Supported (lossy)** | Flagged in the UI; only the first frame is kept — browsers cannot rasterize a full animation loop safely |
-| **PDF** | PDF (merged) | `pdf-lib` copyPages | **Supported** | All queue-order PDFs combine into one document |
-| **PDF** | PDF (split) | `pdf-lib`, per page | **Supported** | One PDF per page, delivered as a ZIP |
-| **PDF** | PDF (rotated) | `pdf-lib` /Rotate | **Supported** | 90/180/270 degrees |
-| **PDF** | PDF (extract/reorder) | `pdf-lib` copyPages | **Supported** | Page spec `1,3,5-7`; the listed order is preserved |
-| **PDF** | PDF (compressed) | `pdf-lib` object streams | **Supported (limited)** | Repackages + strips metadata; existing image streams cannot be recompressed, so gains are modest |
-| **DOCX** | HTML / TXT | `mammoth` | **Supported** | Semantic conversion — complex layout/floating images are approximated or dropped |
-| **XLSX / ODS / CSV** | CSV / HTML / TXT / XLSX | `xlsx` (SheetJS) | **Supported** | Parses the first sheet; CSV input is routed through the same engine |
-| **TXT / MD** | PDF | `pdf-lib`, StandardFonts | **Supported** | Genuinely paginated with word-wrap; non-WinAnsi glyphs become `?` |
-| **PDF** | images (rasterize) | — | *Unsupported* | Would need a full PDF renderer (pdf.js); honesty > fake output |
-| **PDF with password** | any | — | *Unsupported* | Password removal/encryption is refused explicitly; no bypass is implemented |
-| **DOC / PPTX / ODT / RTF / EPUB** | — | — | *Unsupported* | Legacy binary DOC and presentation engines are not feasible in-page |
-| **Audio / Video** | — | FFmpeg.wasm | *Unsupported by choice* | ~30 MB engine, cross-origin isolation headers, heavy mobile memory cost — deliberately not shipped |
-| **TIFF** | any | — | *Partially supported* | Validated and accepted, but only converts if the user's browser can decode TIFF (some can); errors are surfaced honestly |
+| **JPG / PNG / WebP / GIF / BMP** | JPG, PNG, WebP, GIF, BMP, TIFF, ICO, PDF | Canvas, `gifenc`, `utif` | **Supported** | JPG/BMP flatten alpha onto white; ICO is capped at 256×256; GIF output is a 256-colour still |
+| **TIFF** | JPG, PNG, WebP, BMP, PDF | `utif` decode → Canvas | **Supported** | Multi-page TIFFs convert their first page |
+| **SVG** | PNG, JPG, WebP, PDF | Browser SVG rasteriser | **Supported** | Rendered at the declared viewBox size |
+| **ICO** | PNG, JPG, WebP | Browser ICO decode | **Supported** | Largest embedded frame is used |
+| **HEIC / HEIF** | JPG, PNG, WebP, TIFF | `heic2any` → Canvas | **Supported** | Decoded locally at full quality |
+| **AVIF** | JPG, PNG, WebP, GIF | Browser AVIF decode | **Supported (input only)** | Browsers can decode but not encode AVIF, so AVIF is never offered as an output |
+| **PDF** | JPG, PNG, WebP, TIFF | `pdfjs-dist` page render | **Supported** | Rendered at 2× scale; multi-page results arrive as a ZIP |
+| **PDF** | TXT, HTML, DOCX, XLSX | `pdfjs-dist` text layer | **Supported** | Headings/tables inferred from font size and x-positions |
+| **PDF** | PPTX | page raster → `pptxgenjs` | **Supported (image)** | One slide per page; appearance kept, text not editable |
+| **PDF** | PDF | `pdf-lib` repackage | **Supported (limited)** | Strips metadata and rebuilds object streams; embedded images are not recompressed |
+| **DOCX** | PDF, HTML, TXT, MD | `mammoth` → layout engine | **Supported** | Fonts, colours and floating shapes are not reproduced |
+| **TXT** | PDF, DOCX, HTML, MD | layout engine + `docx` | **Supported** | Blank-line paragraphs; winansi-only glyphs become `?` |
+| **MD** | HTML, PDF, DOCX, TXT | `marked` + layout engine | **Supported** | GitHub-flavoured basics: headings, lists, emphasis, tables |
+| **HTML** | PDF, TXT, MD, DOCX | `htmlparser2` + `turndown` | **Supported** | Block structure is preserved; CSS layout is not |
+| **XLSX / XLS / ODS / CSV / TSV** | XLSX, XLS, ODS, CSV, TSV, JSON, HTML, PDF | SheetJS | **Supported** | Workbooks keep all sheets; CSV/TSV/JSON export the first sheet and warn first |
+| **PPTX** | PDF, JPG, PNG, PPTX | `pptx-browser` | **Supported** | Real slide canvases; multi-slide image output arrives as a ZIP |
+| **DOC / ODT / RTF / PPT / ODP** | — | — | *Unsupported* | No reliable in-browser parser; the intake rejects them with "save as .docx/.pptx first" |
+| **Scanned PDF (no text layer)** | TXT / DOCX / XLSX / HTML | — | *Unsupported* | Refused honestly; no OCR engine is bundled. Choose an image format instead |
+| **Audio / Video** | — | — | *Unsupported by choice* | FFmpeg.wasm would add ~30 MB and cross-origin isolation requirements |
 
 ---
 
@@ -153,31 +164,26 @@ Everything in the **Supported** column has an implemented, unit-tested local han
 
 ## 6. How to Add a New Format Handler
 
-To add a new format converter (e.g., SVG to PNG):
+1. **Declare the route in `src/lib/registry.js`**: add the output to the input signature's
+   `outputs` array (plus an `OUTPUT_FORMATS` entry if the format is new). If the target cannot
+   keep something the source has, add a line to `LIMITATIONS` too — the panel shows it after
+   conversion.
+2. **Implement the transform in the matching engine** (`imageEngine`, `pdfEngine`, `docEngine`,
+   `sheetEngine`, `slidesEngine`) and return `{ blob, warnings }` with a real MIME type.
+3. **Wire the dispatch** in `src/lib/converters.js` if the engine is new to that category.
+4. **Test the bytes, not the label**: extend `tests/converters.test.js` and assert the produced
+   blob's magic signature via `detectSignature` (PNG/JPEG/PDF/OOXML magic), plus a round-trip
+   where possible.
 
-1. **Register Format in `src/lib/converters.js`**:
-   Add the format definition to `OUTPUT_FORMATS`:
-   ```javascript
-   export const OUTPUT_FORMATS = {
-     // ...
-     svg: { id: 'svg', label: 'SVG', ext: '.svg', mime: 'image/svg+xml', category: 'image' },
-   }
-   ```
-2. **Update Availability Logic**:
-   Update `availableFormatsFor(file)` in `src/lib/converters.js` to return the new output format when compatible input files are detected.
-3. **Implement Conversion Function**:
-   Write the transformation routine (e.g., `imageToSvg()` or custom canvas serializer) and integrate it into `convertAll()`.
-4. **Add Unit Tests**:
-   Create a test case in `tests/converters.test.js` validating that the new format produces valid magic bytes and mime types.
-
----
+The UI needs no change: the selector and the homepage chart both read the registry.
 
 ## 7. How to Modify the UI and Styles
 
 - **Colors and Tokens**: Edit `@theme` variables in `src/index.css` for custom color palettes, borders, and typography.
-- **Header & Branding**: Modify `src/components/Header.jsx` to update links, navigation, and badges.
-- **Conversion Controls**: Edit `src/components/ConversionControls.jsx` for button arrangements and dropdown styles.
-- **Queue & Results Card**: Edit `src/components/FileQueue.jsx` to customize per-file progress bars, badges, or download actions.
+- **Header & Branding**: Modify `src/components/Header.jsx` to update the logo and brand text.
+- **Conversion Panel**: Edit `src/components/ConversionPanel.jsx` for the output selector, convert button, progress and result actions.
+- **Upload Area**: Edit `src/components/Dropzone.jsx` for the drag-and-drop area and Select Files button.
+- **Support Chart**: Edit `src/components/SupportedFormats.jsx` for layout only — the rows come from `registry.js`.
 
 ---
 
@@ -202,8 +208,8 @@ When modifying shared features, ensure coordinated updates across these linked f
 | Feature / System | Primary File | Coordinated Files |
 | :--- | :--- | :--- |
 | **Supported File Types** | `src/lib/fileValidation.js` | `src/lib/converters.js`, `src/components/Dropzone.jsx` |
-| **State & Batch Actions** | `src/context/AppContext.jsx` | `src/components/FileQueue.jsx`, `src/components/ConversionControls.jsx` |
-| **Quality Presets** | `src/lib/converters.js` | `src/components/ConversionControls.jsx`, `src/components/FileQueue.jsx` |
+| **State & Batch Actions** | `src/context/AppContext.jsx` | `src/components/ConversionPanel.jsx` |
+| **Quality Presets** | `src/lib/converters.js` | `src/components/ConversionPanel.jsx` |
 | **Security Headers & CSP** | `public/_headers` | `index.html` |
 
 ---
